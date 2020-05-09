@@ -1,7 +1,7 @@
 # bencode_rs 
 Simple and minimal bencode parser.
 
-Example program that read bencode from stdin and prints to stdout: 
+Example program that reads bencode from stdin and prints to stdout: 
 
 ```
 use bencode_rs;
