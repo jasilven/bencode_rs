@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::{self, Display};
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
+use std::hash::{DefaultHasher, Hash};
 use std::io::BufRead;
-use std::iter::Iterator;
 use std::str::FromStr;
 use std::string::ToString;
 
@@ -40,15 +40,37 @@ impl From<std::num::ParseIntError> for BencodeError {
     }
 }
 
-#[derive(Clone, Debug, Eq)]
-pub struct HMap(pub HashMap<Value, Value>);
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
-    Map(HMap),
+    Map(HashMap<Value, Value>),
     List(Vec<Value>),
     Str(String),
     Int(i32),
+}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Value::Map(map) => {
+                let mut seed = 1;
+                for elem in map.iter() {
+                    let mut hasher = DefaultHasher::new();
+                    elem.hash(&mut hasher);
+                    seed = hasher.finish().wrapping_add(seed);
+                }
+                seed.to_be_bytes().hash(state);
+            }
+            Value::List(vec) => {
+                vec.hash(state);
+            }
+            Value::Str(s) => {
+                s.hash(state);
+            }
+            Value::Int(i) => {
+                i.hash(state);
+            }
+        }
+    }
 }
 
 impl From<&str> for Value {
@@ -59,7 +81,7 @@ impl From<&str> for Value {
 
 impl From<HashMap<Value, Value>> for Value {
     fn from(m: HashMap<Value, Value>) -> Self {
-        Value::Map(HMap::new(m))
+        Value::Map(m)
     }
 }
 
@@ -69,8 +91,7 @@ impl From<HashMap<&str, &str>> for Value {
         for (k, v) in map {
             m.insert(Value::Str(k.to_string()), Value::Str(v.to_string()));
         }
-        let hm = HMap::new(m);
-        Value::Map(hm)
+        Value::Map(m)
     }
 }
 
@@ -81,7 +102,7 @@ impl TryInto<HashMap<String, String>> for Value {
         match self {
             Value::Map(hm) => {
                 let mut map = HashMap::<String, String>::new();
-                for key in hm.0.keys() {
+                for key in hm.keys() {
                     // safe to unwrap here
                     map.insert(format!("{}", &key), format!("{}", &hm.get(key).unwrap()));
                 }
@@ -92,39 +113,12 @@ impl TryInto<HashMap<String, String>> for Value {
     }
 }
 
-impl HMap {
-    pub fn new(map: HashMap<Value, Value>) -> Self {
-        HMap(map)
-    }
-
-    pub fn get(&self, key: &Value) -> Option<&Value> {
-        self.0.get(key)
-    }
-}
-
-impl Hash for HMap {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let mut keys: Vec<String> = self.0.keys().map(|k| format!("{:?}", k)).collect();
-        let mut vals: Vec<String> = self.0.values().map(|v| format!("{:?}", v)).collect();
-        keys.sort();
-        vals.sort();
-        keys.hash(state);
-        vals.hash(state);
-    }
-}
-
-impl PartialEq for HMap {
-    fn eq(&self, other: &HMap) -> bool {
-        self.0.eq(&other.0)
-    }
-}
-
 impl Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Map(hm) => {
+            Value::Map(map) => {
                 let mut result = String::from("{");
-                for (key, val) in hm.0.iter() {
+                for (key, val) in map.iter() {
                     result.push_str(&format!("{} {} ", &key, &val));
                 }
                 let mut result = result.trim_end().to_string();
@@ -137,9 +131,7 @@ impl Display for Value {
                     result.push_str(&item.to_string());
                     result.push_str(", ");
                 }
-                let mut result = result
-                    .trim_end_matches(|c| c == ',' || c == ' ')
-                    .to_string();
+                let mut result = result.trim_end_matches([',', ' ']).to_string();
                 result.push(']');
                 write!(f, "{}", result)
             }
@@ -154,7 +146,7 @@ impl Value {
         match self {
             Value::Map(hm) => {
                 let mut result = String::from("d");
-                for (key, val) in hm.0.iter() {
+                for (key, val) in hm.iter() {
                     result.push_str(&format!("{}{}", key.to_bencode(), val.to_bencode()));
                 }
                 result.push('e');
@@ -175,57 +167,61 @@ impl Value {
 }
 
 pub fn parse_bencode(reader: &mut dyn BufRead) -> Result<Option<Value>> {
-    let mut buf = vec![];
-    buf.resize(1, 0);
+    let mut buf = vec![0; 1];
+    // buf.resize(1, 0);
     match reader.read_exact(&mut buf[0..1]) {
         Ok(()) => match buf[0] {
-            b'i' => match reader.read_until(b'e', &mut buf) {
-                Ok(cnt) => {
-                    let s = String::from_utf8_lossy(&buf[1..cnt]);
-                    let n = i32::from_str(&s)?;
-                    Ok(Some(Value::Int(n)))
-                }
-                Err(e) => Err(e.into()),
-            },
+            b'i' => {
+                let cnt = reader.read_until(b'e', &mut buf)?;
+                let n = i32::from_str(&String::from_utf8_lossy(&buf[1..cnt]))?;
+                Ok(Some(Value::Int(n)))
+            }
             b'd' => {
                 let mut map = HashMap::new();
                 loop {
-                    match parse_bencode(reader) {
-                        Ok(None) => return Ok(Some(Value::Map(HMap(map)))),
-                        Ok(Some(v)) => map.insert(v, parse_bencode(reader)?.unwrap()),
-                        Err(e) => return Err(e),
+                    match parse_bencode(reader)? {
+                        None => return Ok(Some(Value::Map(map))),
+                        Some(key) => match parse_bencode(reader)? {
+                            Some(val) => {
+                                map.insert(key, val);
+                            }
+                            None => {
+                                return Err(BencodeError::Error(
+                                    "Map is missing value for key".to_string(),
+                                ))
+                            }
+                        },
                     };
                 }
             }
             b'l' => {
                 let mut list = Vec::<Value>::new();
                 loop {
-                    match parse_bencode(reader) {
-                        Ok(None) => return Ok(Some(Value::List(list))),
-                        Ok(Some(v)) => list.push(v),
-                        Err(e) => return Err(e),
+                    match parse_bencode(reader)? {
+                        None => return Ok(Some(Value::List(list))),
+                        Some(v) => list.push(v),
                     }
                 }
             }
             b'e' => Ok(None),
             b'0' => {
-                reader.read_until(b':', &mut buf)?;
+                let _ = reader.read_until(b':', &mut buf)?;
                 Ok(Some(Value::Str("".to_string())))
             }
-            _ => match reader.read_until(b':', &mut buf) {
+            b'1'..=b'9' => match reader.read_until(b':', &mut buf) {
                 Ok(_) => {
-                    buf.resize(buf.len() - 1, 0);
-                    let mut s = String::from("");
-                    buf.iter().for_each(|i| s.push(*i as char));
-                    let cnt = usize::from_str(&s)?;
+                    let cnt = usize::from_str(&String::from_utf8_lossy(&buf[0..buf.len() - 1]))?;
                     buf.resize(cnt, 0);
                     reader.read_exact(&mut buf[0..cnt])?;
                     Ok(Some(Value::Str(
                         String::from_utf8_lossy(&buf[..]).to_string(),
                     )))
                 }
-                Err(e) => Err(BencodeError::Io(e)),
+                Err(e) => Err(BencodeError::Error(format!(
+                    "failed to read until ':': {e}"
+                ))),
             },
+            x => Err(BencodeError::Error(format!("invalid character: '{x}'"))),
         },
         Err(e) => match e.kind() {
             std::io::ErrorKind::UnexpectedEof => Err(BencodeError::Eof()),
@@ -296,11 +292,11 @@ mod tests {
         let mut m1 = HashMap::new();
         m1.insert(Value::Str("bar".to_string()), Value::Str("baz".to_string()));
         let m1_c = m1.clone();
-        let left1 = Value::Map(HMap::new(m1));
+        let left1 = Value::Map(m1);
 
         let mut m2 = HashMap::new();
-        m2.insert(Value::Str("foo".to_string()), Value::Map(HMap::new(m1_c)));
-        let left2 = Value::Map(HMap::new(m2));
+        m2.insert(Value::Str("foo".to_string()), Value::Map(m1_c));
+        let left2 = Value::Map(m2);
 
         let sright1 = "d3:bar3:baze".to_string();
         let mut right1 = BufReader::new(sright1.as_bytes());
@@ -311,5 +307,22 @@ mod tests {
         let mut right2 = BufReader::new(sright2.as_bytes());
         assert_eq!(left2, parse_bencode(&mut right2).unwrap().unwrap());
         assert_eq!(left2.to_bencode(), sright2);
+    }
+
+    #[test]
+    fn test_parse_bencode_map2() {
+        let mut map = HashMap::new();
+        map.insert(
+            Value::Str("code".to_string()),
+            Value::Str("(+ 1 2)\n".to_string()),
+        );
+        map.insert(Value::Str("op".to_string()), Value::Str("eval".to_string()));
+
+        let input = "d4:code8:(+ 1 2)\n2:op4:evale".to_string();
+        let mut reader = BufReader::new(input.as_bytes());
+        assert_eq!(
+            Value::Map(map),
+            parse_bencode(&mut reader).unwrap().unwrap()
+        );
     }
 }

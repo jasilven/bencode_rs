@@ -1,8 +1,8 @@
 [package]
 name = "bencode_rs"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["jasilven <jasilven@gmail.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT"
 homepage = "https://github.com/jasilven/bencode_rs"
 repository = "https://github.com/jasilven/bencode_rs"
