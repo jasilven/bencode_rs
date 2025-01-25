@@ -5,7 +5,7 @@ Example program that reads bencode from stdin and prints to stdout:
 
 ```
 [dependencies]
-bencode_rs = { git = "https://github.com/jasilven/bencode_rs", tag = "v0.1.0" }
+bencode_rs = { git = "https://github.com/jasilven/bencode_rs" }
 ```
 
 ```
